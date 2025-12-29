@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>图片标注任务仪表盘</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Supabase SDK -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-gray-50 min-h-screen p-4 md:p-8">
+  <div class="max-w-6xl mx-auto">
+    <!-- 标题 -->
+    <header class="mb-8 text-center">
+      <h1 class="text-3xl font-bold text-gray-800">图片标注任务自动化仪表盘</h1>
+      <p class="text-gray-500 mt-2">触发流程 → 从images表读取 → API处理 → 结果存入annotations表</p>
+    </header>
+
+    <!-- 1. 任务发起表单 -->
+    <section class="bg-white rounded-lg shadow p-6 mb-8">
+      <h2 class="text-xl font-semibold text-gray-700 mb-4">触发标注流程</h2>
+      <form id="taskForm" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <label class="block text-gray-600 mb-1">模型</label>
+          <div class="w-full p-2 border border-gray-300 rounded bg-gray-50 text-gray-700">
+            豆包 (doubao-1-5-vision-pro-32k-250115)
+          </div>
+        </div>
+        <div>
+          <label class="block text-gray-600 mb-1">数据集</label>
+          <div class="w-full p-2 border border-gray-300 rounded bg-gray-50 text-gray-700">
+            image数据集
+          </div>
+        </div>
+        <div class="flex items-end">
+          <button type="submit" class="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600 transition">
+            触发流程
+          </button>
+        </div>
+      </form>
+      <p id="taskMsg" class="mt-3 text-sm text-green-600 hidden">流程已触发！正在处理images表中的数据...</p>
+    </section>
+
+    <!-- 2. 标注结果列表（从annotations表读取） -->
+    <section class="bg-white rounded-lg shadow p-6 mb-8">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="text-xl font-semibold text-gray-700">标注结果列表</h2>
+        <button id="refreshTasks" class="bg-gray-200 p-2 rounded hover:bg-gray-300 transition text-sm">
+          刷新状态
+        </button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full border-collapse">
+          <thead>
+            <tr class="bg-gray-100">
+              <th class="border border-gray-300 p-2 text-left">ID</th>
+              <th class="border border-gray-300 p-2 text-left">Image</th>
+              <th class="border border-gray-300 p-2 text-left">创建时间</th>
+            </tr>
+          </thead>
+          <tbody id="taskTableBody">
+            <tr>
+              <td colspan="3" class="border border-gray-300 p-4 text-center text-gray-500">
+                点击"刷新状态"加载标注结果...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 3. 结果可视化 + 跳转按钮 -->
+    <section class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div class="bg-white rounded-lg shadow p-6 md:col-span-2">
+        <h2 class="text-xl font-semibold text-gray-700 mb-4">标注结果统计</h2>
+        <div class="h-64">
+          <canvas id="resultChart"></canvas>
+        </div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-6 flex flex-col items-center justify-center">
+        <h2 class="text-xl font-semibold text-gray-700 mb-4 text-center">前往标注工作台</h2>
+        <a href="http://127.0.0.1:5000/" target="_blank"
+          class="bg-green-500 text-white px-6 py-3 rounded hover:bg-green-600 transition text-center block w-full text-center">
+          打开本地标注工作台
+        </a>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // ================== 配置区 ==================
+    const SUPABASE_URL = "https://jvewcwakqrgmdquutxpo.supabase.co";
+    const SUPABASE_ANON_KEY =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imp2ZXdjd2FrcXJnbWRxdXV0eHBvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIyMzc5OTMsImV4cCI6MjA3NzgxMzk5M30.PU21eWzL600l5zhrB8atSwlYOwa9cxponyUAYg7gmMU";
+    const N8N_WEBHOOK_URL = "http://localhost:5678/webhook-test/webhook/task";
+    
+    const IMAGES_TABLE = "images";
+    const ANNOTATIONS_TABLE = "annotations";
+    
+    const API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completeic";
+    const API_AUTH_TOKEN = "Bearer dfd7dea6-f189-4e18-a352-23d25a447e96";
+    const MODEL_NAME = "doubao-1-5-vision-pro-32k-250115";
+    const DATASET_NAME = "image";
+
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    document.getElementById("taskForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const taskMsgEl = document.getElementById("taskMsg");
+
+      try {
+        const response = await fetch(N8N_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: MODEL_NAME, dataset: DATASET_NAME }),
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+
+        taskMsgEl.classList.remove("hidden");
+        setTimeout(() => taskMsgEl.classList.add("hidden"), 3000);
+        loadAnnotations(); 
+      } catch (err) {
+        console.error("流程触发失败:", err);
+        alert("流程触发失败：\n" + err.message + "\n\n请确认 n8n 是否在运行");
+      }
+    });
+
+    async function loadAnnotations() {
+      const tableBody = document.getElementById("taskTableBody");
+      tableBody.innerHTML =
+        '<tr><td colspan="3" class="border border-gray-300 p-4 text-center text-gray-500">加载中...</td></tr>';
+
+      try {
+        const { data, error } = await supabaseClient
+          .from(ANNOTATIONS_TABLE)
+          .select("id, image, created_at")
+          .order("created_at", { ascending: false })
+          .limit(100);
+
+        if (error) throw error;
+
+        if (!data || data.length === 0) {
+          tableBody.innerHTML =
+            '<tr><td colspan="3" class="border border-gray-300 p-4 text-center text-gray-500">暂无标注结果，请先触发流程处理images表中的数据</td></tr>';
+          return;
+        }
+
+        tableBody.innerHTML = data
+          .map((annotation) => {
+            return `
+              <tr>
+                <td class="border border-gray-300 p-2">${annotation.id || "N/A"}</td>
+                <td class="border border-gray-300 p-2">${annotation.image || "N/A"}</td>
+                <td class="border border-gray-300 p-2">${annotation.created_at ? new Date(annotation.created_at).toLocaleString() : "N/A"}</td>
+              </tr>
+            `;
+          })
+          .join("");
+      } catch (err) {
+        console.error("加载标注结果失败:", err);
+        tableBody.innerHTML = `<tr><td colspan="3" class="border border-gray-300 p-4 text-center text-red-500">加载失败：${err.message}</td></tr>`;
+      }
+    }
+
+    async function loadResultChart() {
+      const ctx = document.getElementById("resultChart").getContext("2d");
+
+      try {
+        const { data, error } = await supabaseClient
+          .from(ANNOTATIONS_TABLE)
+          .select("created_at")
+          .order("created_at", { ascending: true });
+
+        if (error) throw error;
+
+        const timeCount = {};
+        (data || []).forEach((item) => {
+          if (item.created_at) {
+            const date = new Date(item.created_at);
+            const timeKey = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+            timeCount[timeKey] = (timeCount[timeKey] || 0) + 1;
+          }
+        });
+
+        let labels = Object.keys(timeCount);
+        let values = Object.values(timeCount);
+
+        if (labels.length === 0) {
+          labels = ["暂无数据"];
+          values = [0];
+        } else {
+          const sortedEntries = labels.map((label, index) => [label, values[index]])
+            .sort((a, b) => a[0].localeCompare(b[0]));
+          labels = sortedEntries.map(entry => entry[0]);
+          values = sortedEntries.map(entry => entry[1]);
+        }
+
+        Chart.getChart("resultChart")?.destroy();
+
+        new Chart(ctx, {
+          type: "bar",
+          data: {
+            labels: labels,
+            datasets: [{
+              label: "标注数量",
+              data: values,
+              backgroundColor: "#3b82f6",
+              borderRadius: 4,
+              borderSkipped: false,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: true } },
+            scales: {
+              y: {
+                beginAtZero: true,
+                title: { display: true, text: "标注数量" },
+                ticks: { stepSize: 1, precision: 0 }
+              },
+              x: {
+                title: { display: true, text: "时间（时:分:秒）" },
+              },
+            },
+          },
+        });
+      } catch (err) {
+        console.error("加载图表失败:", err);
+        ctx.canvas.parentElement.innerHTML = `<p class="text-center text-red-500 mt-8">图表加载失败：${err.message}</p>`;
+      }
+    }
+
+    window.addEventListener("load", () => {
+      loadAnnotations();
+      loadResultChart();
+    });
+
+    document.getElementById("refreshTasks").addEventListener("click", () => {
+      loadAnnotations();
+      loadResultChart();
+    });
+  </script>
+</body>
+</html>
